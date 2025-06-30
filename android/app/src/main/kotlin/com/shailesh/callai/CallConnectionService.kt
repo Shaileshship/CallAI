@@ -22,6 +22,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import android.telecom.DisconnectCause
+import android.content.Context
+import android.speech.tts.TextToSpeech
+import android.speech.SpeechRecognizer
+import android.media.AudioFocusRequest
+import android.media.AudioManager.OnAudioFocusChangeListener
+import java.util.Locale
 
 @RequiresApi(Build.VERSION_CODES.M)
 class CallConnectionService : ConnectionService() {
@@ -34,14 +41,68 @@ class CallConnectionService : ConnectionService() {
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
     private val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+    private var tts: TextToSpeech? = null
+    private var stt: SpeechRecognizer? = null
+    private var ttsReady = false
+    private var sttReady = false
+    private var aiSpeaking = false
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var audioManager: AudioManager? = null
+    private var rnnoiseState: Long = 0L // JNI handle for RNNoise
     
     companion object {
         private const val TAG = "CallConnectionService"
         private var methodChannel: MethodChannel? = null
+        private var instance: CallConnectionService? = null
         
         fun setMethodChannel(channel: MethodChannel) {
             methodChannel = channel
         }
+
+        fun playAudio(audioData: ByteArray) {
+            instance?.playAudioData(audioData)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        // Request audio focus for the app
+        val focusListener = OnAudioFocusChangeListener { focusChange ->
+            // Handle focus changes if needed
+        }
+        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+            .setOnAudioFocusChangeListener(focusListener)
+            .build()
+        audioManager?.requestAudioFocus(audioFocusRequest!!)
+        // Force speakerphone ON
+        audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+        audioManager?.isSpeakerphoneOn = true
+        // Initialize TTS
+        tts = TextToSpeech(this) { status ->
+            ttsReady = (status == TextToSpeech.SUCCESS)
+            if (ttsReady) {
+                tts?.language = Locale.US
+                // Use best available voice (e.g., Wavenet)
+                tts?.voice = tts?.voices?.find { it.locale == Locale.US && it.name.contains("wavenet", true) } ?: tts?.defaultVoice
+            }
+        }
+        // Initialize STT
+        stt = SpeechRecognizer.createSpeechRecognizer(this)
+        sttReady = true // You may want to add a listener for full readiness
+        // Initialize RNNoise
+        rnnoiseState = RNNoise.create()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        RNNoise.destroy(rnnoiseState)
+        audioScope.cancel()
+        instance = null
+        tts?.shutdown()
+        stt?.destroy()
+        audioManager?.abandonAudioFocusRequest(audioFocusRequest!!)
     }
 
     override fun onCreateOutgoingConnection(
@@ -51,16 +112,7 @@ class CallConnectionService : ConnectionService() {
         Log.d(TAG, "onCreateOutgoingConnection")
         request ?: throw RuntimeException("ConnectionRequest cannot be null")
 
-        val connection = CallConnection()
-        connection.setInitializing()
-        connection.setAddress(request.address, TelecomManager.PRESENTATION_ALLOWED)
-        
-        // Set up audio capabilities
-        connection.audioModeIsVoip = true
-        connection.setConnectionCapabilities(Connection.CAPABILITY_MUTE)
-        
-        // Start audio processing when call becomes active
-        connection.setCallAudioStateChangedListener { audioState ->
+        val connection = CallConnection { audioState ->
             Log.d(TAG, "Audio state changed: $audioState")
             if (audioState?.isMuted == false) {
                 startAudioProcessing()
@@ -68,17 +120,25 @@ class CallConnectionService : ConnectionService() {
                 stopAudioProcessing()
             }
         }
-
+        connection.setInitializing()
+        connection.setAddress(request.address, TelecomManager.PRESENTATION_ALLOWED)
+        
+        // Set up audio capabilities
+        connection.audioModeIsVoip = true
+        connection.setConnectionCapabilities(Connection.CAPABILITY_MUTE)
+        
         connection.setActive()
         return connection
     }
 
     private fun startAudioProcessing() {
         if (isRecording) return
-        
         Log.d(TAG, "Starting audio processing")
         isRecording = true
-        
+        // Request audio focus and force speakerphone ON
+        audioManager?.requestAudioFocus(audioFocusRequest!!)
+        audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+        audioManager?.isSpeakerphoneOn = true
         audioScope.launch {
             try {
                 setupAudioRecord()
@@ -117,36 +177,42 @@ class CallConnectionService : ConnectionService() {
     }
 
     private fun setupAudioTrack() {
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build())
-            .setAudioFormat(android.media.AudioFormat.Builder()
-                .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(sampleRate)
-                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
-                .build())
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        
+        audioTrack = AudioTrack(
+            AudioManager.STREAM_VOICE_CALL,
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize,
+            AudioTrack.MODE_STREAM
+        )
         audioTrack?.play()
-        Log.d(TAG, "AudioTrack started")
+        Log.d(TAG, "AudioTrack started (STREAM_VOICE_CALL)")
     }
 
     private suspend fun processAudioStream() {
-        val buffer = ByteArray(bufferSize)
-        
+        val buffer = ShortArray(bufferSize / 2)
+        val byteBuffer = ByteBuffer.allocate(bufferSize).order(ByteOrder.LITTLE_ENDIAN)
         while (isRecording) {
-            val readSize = audioRecord?.read(buffer, 0, bufferSize) ?: 0
+            val readSize = audioRecord?.read(byteBuffer.array(), 0, byteBuffer.capacity()) ?: 0
             if (readSize > 0) {
-                // Send audio data to Flutter for processing
-                sendAudioToFlutter(buffer.copyOf(readSize))
+                byteBuffer.asShortBuffer().get(buffer)
+
+                // Noise cancellation with RNNoise JNI
+                RNNoise.processFrame(rnnoiseState, buffer)
+
+                byteBuffer.asShortBuffer().put(buffer)
                 
-                // For now, just echo the audio back (we'll replace this with AI processing)
+                // Send processed audio to Flutter for AI/STT
+                sendAudioToFlutter(byteBuffer.array().copyOf(readSize))
+                // Barge-in logic: if AI is speaking and user starts speaking, stop TTS
+                if (aiSpeaking && userSpeechDetected(byteBuffer.array())) {
+                    tts?.stop()
+                    aiSpeaking = false
+                    // Start STT listening here
+                }
+                // Echo or play AI audio if needed
                 if (isPlaying) {
-                    audioTrack?.write(buffer, 0, readSize)
+                    audioTrack?.write(byteBuffer.array(), 0, readSize)
                 }
             }
         }
@@ -154,9 +220,20 @@ class CallConnectionService : ConnectionService() {
 
     private suspend fun sendAudioToFlutter(audioData: ByteArray) {
         try {
-            methodChannel?.invokeMethod("processAudio", mapOf("audioData" to audioData))
+            methodChannel?.invokeMethod("onSpeech", mapOf("audioData" to audioData))
         } catch (e: Exception) {
             Log.e(TAG, "Error sending audio to Flutter", e)
+        }
+    }
+
+    fun playAudioData(audioData: ByteArray) {
+        audioScope.launch {
+            try {
+                val written = audioTrack?.write(audioData, 0, audioData.size)
+                Log.d(TAG, "AudioTrack write result: $written bytes")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error playing audio data", e)
+            }
         }
     }
 
@@ -174,20 +251,36 @@ class CallConnectionService : ConnectionService() {
     ): Connection {
         Log.d(TAG, "onCreateIncomingConnection - Rejecting")
         request ?: throw RuntimeException("ConnectionRequest cannot be null")
-        val connection = CallConnection()
-        connection.setDisconnected("Not supported")
+        val connection = CallConnection {}
+        connection.setDisconnected(DisconnectCause(DisconnectCause.REJECTED, "Not supported"))
         return connection
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        stopAudioProcessing()
-        audioScope.cancel()
+    fun speakAI(text: String) {
+        if (ttsReady) {
+            aiSpeaking = true
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "AI_TTS")
+        }
     }
+
+    fun stopAISpeech() {
+        tts?.stop()
+        aiSpeaking = false
+    }
+
+    // Placeholder for user speech detection (could use amplitude or partial STT)
+    private fun userSpeechDetected(audio: ByteArray): Boolean {
+        // TODO: Implement real VAD or use STT partial results
+        return false
+    }
+
+    // JNI methods for RNNoise
+    external fun rnnoiseInit(): Long
+    external fun rnnoiseProcess(state: Long, input: ByteArray, output: ByteArray, length: Int): Int
 }
 
 @RequiresApi(Build.VERSION_CODES.M)
-class CallConnection : Connection() {
+class CallConnection(private val onAudioStateChanged: (state: android.telecom.CallAudioState?) -> Unit) : Connection() {
 
     init {
         audioModeIsVoip = true
@@ -199,6 +292,7 @@ class CallConnection : Connection() {
 
     override fun onCallAudioStateChanged(state: android.telecom.CallAudioState?) {
         Log.d("CallConnection", "onCallAudioStateChanged: $state")
+        onAudioStateChanged(state)
     }
 
     override fun onStateChanged(state: Int) {
@@ -222,6 +316,7 @@ class CallConnection : Connection() {
 
     override fun onDisconnect() {
         Log.d("CallConnection", "onDisconnect")
+        setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
         destroy()
     }
 
@@ -231,6 +326,7 @@ class CallConnection : Connection() {
 
     override fun onAbort() {
         Log.d("CallConnection", "onAbort")
+        setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
         destroy()
     }
 

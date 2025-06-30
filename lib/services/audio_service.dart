@@ -1,36 +1,75 @@
 import 'package:flutter/services.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'firebase_service.dart';
+import 'package:get_it/get_it.dart';
+import 'wallet_service.dart';
+import 'dart:async';
 
 class AudioService {
   static const platform = MethodChannel('com.shailesh.callai/audio');
   static const audioChannel = MethodChannel('com.shailesh.callai/audio');
   
-  static AudioService? _instance;
-  static AudioService get instance => _instance ??= AudioService._();
-  
-  AudioService._() {
-    _initAudioProcessing();
+  final FlutterTts tts;
+  final SpeechToText stt;
+
+  AudioService(this.tts, this.stt);
+
+  static void register() {
+    GetIt.I.registerSingletonAsync<AudioService>(() async {
+      final tts = FlutterTts();
+      final sttInstance = SpeechToText();
+      
+      // Set up TTS
+      // These settings can be adjusted as needed
+      await tts.setLanguage("en-US");
+      await tts.setSpeechRate(0.5);
+      await tts.setVolume(1.0);
+      await tts.setPitch(1.0);
+      
+      // Await for TTS settings to be set before proceeding.
+      // On Android, this might help in forcing audio to the speaker.
+      await tts.awaitSpeakCompletion(true);
+      await tts.setIosAudioCategory(
+        IosTextToSpeechAudioCategory.playback, 
+        [
+          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
+          IosTextToSpeechAudioCategoryOptions.mixWithOthers
+        ]
+      );
+
+      // Initialize STT
+      await sttInstance.initialize(
+        onError: (error) => print('STT Error: $error'),
+        onStatus: (status) => print('STT Status: $status'),
+      );
+
+      final service = AudioService(tts, sttInstance);
+      return service;
+    });
   }
 
-  stt.SpeechToText? _speechToText;
-  FlutterTts? _tts;
+  static AudioService get instance => GetIt.I<AudioService>();
+
+  bool get isListening => _isListening;
+  
+  Future<void> stopListening() async {
+    if (_isListening) {
+      await stt.stop();
+      _isListening = false;
+    }
+  }
+
   bool _isListening = false;
+  bool _isSpeaking = false;
   String _currentConversation = '';
   String _contactName = '';
   String _prompt = '';
   String _deviceId = '';
+  String _aiProvider = 'deepseek';
+  double _aiPrice = 0.2;
 
   void _initAudioProcessing() {
-    _speechToText = stt.SpeechToText();
-    _tts = FlutterTts();
-    
-    // Set up TTS
-    _tts?.setLanguage('en-US');
-    _tts?.setSpeechRate(0.5);
-    _tts?.setVolume(1.0);
-    
     // Set up method channel handler
     audioChannel.setMethodCallHandler((call) async {
       switch (call.method) {
@@ -49,92 +88,93 @@ class AudioService {
     });
   }
 
-  Future<void> startCall(String contactName, String prompt, String deviceId) async {
+  Future<void> startCall(String contactName, String prompt, String deviceId, {String provider = 'deepseek', double price = 0.2}) async {
     _contactName = contactName;
     _prompt = prompt;
     _deviceId = deviceId;
+    _aiProvider = provider;
+    _aiPrice = price;
     _currentConversation = '';
-    
-    // Initialize speech recognition
-    await _speechToText?.initialize();
-    
+    // Deduct price from wallet
+    await WalletService.buyPackFromWallet(deviceId); // You may want to create a new method to deduct exact price
     // Start listening for speech
-    await _startListening();
+    await startListening();
   }
 
-  Future<void> _startListening() async {
-    if (_isListening) return;
-    
+  Future<String> startListening() async {
+    if (_isListening || _isSpeaking) return '';
     _isListening = true;
-    await _speechToText?.listen(
+
+    final completer = Completer<String>();
+
+    await stt.listen(
       onResult: (result) async {
         if (result.finalResult) {
           final text = result.recognizedWords;
           if (text.isNotEmpty) {
-            await _processSpeech(text);
+            completer.complete(text);
+          } else {
+            completer.complete('');
           }
         }
       },
       listenFor: const Duration(seconds: 30),
       pauseFor: const Duration(seconds: 3),
     );
+
+    // Wait for the result and return it
+    final recognizedText = await completer.future;
+    _isListening = false;
+    return recognizedText;
   }
 
   Future<void> _processSpeech(String speech) async {
-    // Add to conversation history
     _currentConversation += 'User: $speech\n';
-    
     try {
-      // Get Gemini API key
       final apiKeys = await FirebaseService.getUserApiKeys(_deviceId);
-      final geminiApiKey = apiKeys['gemini'];
-      
-      if (geminiApiKey == null || geminiApiKey.isEmpty) {
-        throw Exception('No Gemini API key available');
+      final apiKey = apiKeys[_aiProvider];
+      if (apiKey == null || apiKey.isEmpty) {
+        throw Exception('No $_aiProvider API key available');
       }
-
-      // Generate AI response
-      final aiResponse = await _generateAIResponse(speech, geminiApiKey);
-      
-      // Add AI response to conversation
+      final aiResponse = await FirebaseService.generateAIResponse(speech, _aiProvider, apiKey);
       _currentConversation += 'AI: $aiResponse\n';
-      
-      // Convert AI response to speech and play it
-      await _speakResponse(aiResponse);
-      
-      // Continue listening
-      await _startListening();
-      
+      await speakResponse(aiResponse);
     } catch (e) {
       print('Error processing speech: $e');
-      // Continue listening even if there's an error
-      await _startListening();
+    } finally {
+      await startListening();
     }
   }
 
-  Future<String> _generateAIResponse(String userSpeech, String apiKey) async {
-    final context = '''
-You are an AI assistant making a cold call. The person's name is $_contactName.
-Your role: $_prompt
-
-Previous conversation:
-$_currentConversation
-
-Current user speech: $userSpeech
-
-Generate a natural, conversational response that continues the conversation. Keep it brief and engaging.
-''';
-
-    return await FirebaseService.generateResponseWithGemini(context, apiKey);
+  Future<void> _setSpeakerphoneOn(bool on) async {
+    try {
+      // This method call corresponds to the native code in MainActivity.kt
+      await audioChannel.invokeMethod('setSpeakerphoneOn', {'on': on});
+    } on PlatformException catch (e) {
+      print("Failed to set speakerphone on Android: '${e.message}'.");
+    }
   }
 
-  Future<void> _speakResponse(String text) async {
-    await _tts?.speak(text);
+  Future<void> speakResponse(String text) async {
+    if (_isSpeaking) return; // Prevent concurrent speech attempts
+    await stopListening();
+    _isSpeaking = true;
     
-    // Wait for TTS to complete
-    _tts?.setCompletionHandler(() {
-      // TTS completed, continue listening
-    });
+    try {
+      // Turn speaker ON before speaking
+      await _setSpeakerphoneOn(true);
+      // Since awaitSpeakCompletion(true) was set at initialization,
+      // this will wait until speaking is done.
+      await tts.speak(text);
+    } catch (e) {
+      print("TTS Error: $e");
+    } finally {
+      // Turn speaker OFF after speaking or if an error occurred
+      await _setSpeakerphoneOn(false);
+      _isSpeaking = false;
+      // Resume listening for the user
+      startListening();
+    }
   }
 
   Future<void> _processAudioData(List<int> audioData) async {
@@ -150,8 +190,8 @@ Generate a natural, conversational response that continues the conversation. Kee
 
   Future<void> endCall() async {
     _isListening = false;
-    await _speechToText?.stop();
-    await _tts?.stop();
+    await stt.stop();
+    await tts.stop();
     
     // Save conversation log
     await _saveConversationLog();

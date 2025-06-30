@@ -1,0 +1,1 @@
+// Remove all code in this file, as the manual dialer is no longer needed. 

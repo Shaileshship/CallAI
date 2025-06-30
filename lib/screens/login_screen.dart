@@ -50,6 +50,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
       final isExisting = await FirebaseService.isExistingUser(deviceId);
       if (isExisting) {
+        await FirebaseService.storeUserDeviceInfo(deviceId, false);
         await DeviceService.markAsExistingUser();
       } else {
         await FirebaseService.storeUserDeviceInfo(deviceId, true);
@@ -78,7 +79,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       }
     } catch (e) {
       setState(() {
-        _errorMessage = 'An error occurred. Please try again.';
+        _errorMessage = 'Login Failed: ${e.toString()}';
       });
     } finally {
       if (mounted) {
