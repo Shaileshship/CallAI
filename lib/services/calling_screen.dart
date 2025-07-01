@@ -67,9 +67,6 @@ class _CallingScreenState extends State<CallingScreen> {
       final callStarted = await FlutterPhoneDirectCaller.callNumber(phoneNumber);
       if (callStarted == true) {
         setState(() { _isCalling = true; });
-        _phoneStateSubscription = PhoneState.stream.listen((state) {
-          _handlePhoneState(state, contactName);
-        });
       } else {
         _log += 'Failed to start call.\n';
         _processNextCall();
@@ -77,22 +74,6 @@ class _CallingScreenState extends State<CallingScreen> {
     } catch (e) {
       _log += 'Error making call: $e\n';
       _processNextCall();
-    }
-  }
-
-  void _handlePhoneState(PhoneState state, String contactName) {
-    switch (state.status) {
-      case PhoneStateStatus.connected:
-        if (!_callConnected) {
-          _callConnected = true;
-          _startConversation(contactName);
-        }
-        break;
-      case PhoneStateStatus.disconnected:
-        _endCall();
-        break;
-      default:
-        break;
     }
   }
 
@@ -115,8 +96,6 @@ class _CallingScreenState extends State<CallingScreen> {
   Future<void> _endCall() async {
     if (!_isCalling) return;
 
-    await _phoneStateSubscription?.cancel();
-    _phoneStateSubscription = null;
     await _audioService.endCall();
 
     setState(() {

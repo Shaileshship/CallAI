@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
-import 'package:phone_state/phone_state.dart';
 import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter/services.dart';
@@ -54,7 +53,6 @@ class _CallingScreenState extends State<CallingScreen> {
 
   late FlutterTts _tts;
   late SpeechToText _stt;
-  StreamSubscription<PhoneState>? _phoneStateSubscription;
   late AudioService _audioService;
   final Stopwatch _callTimer = Stopwatch();
 
@@ -344,9 +342,6 @@ class _CallingScreenState extends State<CallingScreen> {
       if (callStarted == true) {
         print('[DEBUG] Call initiated successfully');
         setState(() { _isCalling = true; });
-        _phoneStateSubscription = PhoneState.stream.listen((state) {
-          _handlePhoneState(state, contactName);
-        });
       } else {
         print('[DEBUG] Failed to start call');
         _log += 'Failed to start call.\n';
@@ -372,43 +367,6 @@ class _CallingScreenState extends State<CallingScreen> {
       await AudioService.audioChannel.invokeMethod('bringToFront');
     } catch (e) {
       print('Error bringing app to foreground: $e');
-    }
-  }
-
-  void _handlePhoneState(PhoneState state, String contactName) {
-    _logDebug('Phone state changed: ${state.status}');
-    _logDebug('Current call state: connected=$_callConnected, active=$_conversationActive');
-    
-    switch (state.status) {
-      case PhoneStateStatus.CALL_STARTED:
-        _logDebug('Call started - waiting for connection...');
-        if (!_callConnected) {
-          _callTimer.start();
-          _callConnected = true;
-          setState(() {
-            _currentStatus = 'Call started, waiting for connection...';
-          });
-          _logDebug('Call timer started, waiting for proper connection...');
-          
-          // Wait for a reasonable time for call to connect, then start conversation
-          Future.delayed(const Duration(seconds: 5), () {
-            if (!_conversationActive && _callConnected) {
-              _logDebug('Call has been active for 5 seconds, starting conversation...');
-              _startConversation(contactName);
-            }
-          });
-        }
-        break;
-        
-      case PhoneStateStatus.CALL_ENDED:
-        _logDebug('Call ended');
-        _callTimer.stop();
-        _endCall();
-        break;
-        
-      default:
-        _logDebug('Other phone state: ${state.status}');
-        break;
     }
   }
 
@@ -474,10 +432,6 @@ class _CallingScreenState extends State<CallingScreen> {
       return;
     }
 
-    print('[DEBUG] Cancelling phone state subscription...');
-    await _phoneStateSubscription?.cancel();
-    _phoneStateSubscription = null;
-    
     print('[DEBUG] Ending audio service...');
     await _audioService.endCall();
 

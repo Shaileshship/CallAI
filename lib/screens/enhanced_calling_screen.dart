@@ -20,6 +20,7 @@ import '../services/call_state_service.dart';
 import 'login_screen.dart';
 import 'conversation_log_screen.dart';
 import 'calling_screen.dart';
+import 'in_app_calling_screen.dart';
 
 class EnhancedCallingScreen extends StatefulWidget {
   final List<Map<String, String>> contacts;
@@ -27,6 +28,7 @@ class EnhancedCallingScreen extends StatefulWidget {
   final String excelFilePath;
   final String deviceId;
   final String selectedProvider;
+  final String selectedDialer;
 
   const EnhancedCallingScreen({
     Key? key,
@@ -35,6 +37,7 @@ class EnhancedCallingScreen extends StatefulWidget {
     required this.excelFilePath,
     required this.deviceId,
     required this.selectedProvider,
+    required this.selectedDialer,
   }) : super(key: key);
 
   @override
@@ -90,6 +93,18 @@ class _EnhancedCallingScreenState extends State<EnhancedCallingScreen> {
     await _initPermissions();
     await _loadWallet();
     await _startCallStateMonitoring();
+    if (widget.selectedDialer == 'In-App Dialer') {
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (context) => InAppCallingScreen(
+          contacts: widget.contacts,
+          prompt: widget.prompt,
+          excelFilePath: widget.excelFilePath,
+          deviceId: widget.deviceId,
+          selectedProvider: widget.selectedProvider,
+        ),
+      ));
+      return;
+    }
     _processNextCall();
   }
 

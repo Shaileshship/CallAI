@@ -16,7 +16,6 @@ import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../main.dart'; // Import to access getIt
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:phone_state/phone_state.dart';
 import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
 import 'enhanced_calling_screen.dart';
 import 'phone_dialer_screen.dart';
@@ -288,6 +287,29 @@ class _AgentSetupScreenState extends State<AgentSetupScreen> {
     } finally {
       setState(() => _showLoading = false);
     }
+  }
+
+  Widget _buildCard({required String title, required Widget child}) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            child,
+          ],
+        ),
+      ),
+    );
   }
 
   @override

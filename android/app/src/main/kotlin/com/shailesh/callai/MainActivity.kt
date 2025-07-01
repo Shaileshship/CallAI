@@ -23,6 +23,7 @@ import io.flutter.plugin.common.MethodChannel
 import android.media.AudioManager
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
+import androidx.annotation.NonNull
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.shailesh.callai/call"
@@ -38,10 +39,15 @@ class MainActivity: FlutterActivity() {
     private var phoneStateListener: PhoneStateListener? = null
     private var callStateReceiver: BroadcastReceiver? = null
 
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+    override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+
+        // Register the phone account
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PhoneAccountManager.registerPhoneAccount(this)
+        }
 
         // Set up the method channel for the CallConnectionService
         val audioChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AUDIO_CHANNEL)
